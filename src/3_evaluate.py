@@ -36,28 +36,41 @@ class PneumoniaEvaluator:
         
         return results
     
-    def visualize_predictions(self, num_samples=3):
-        """Visualización de predicciones"""
-        print("\n=== VISUALIZACIÓN DE PREDICCIONES ===")
+    def predict_single_image(self, image_path):
+        """Realizar predicción en una sola imagen"""
+        print(f"\n=== PREDICCIÓN PARA IMAGEN: {image_path} ===")
         
-        # Configurar matplotlib
-        plt.figure(figsize=(15, 5*num_samples))
+        # Verificar si la imagen existe
+        if not os.path.exists(image_path):
+            raise FileNotFoundError(f"No se encontró la imagen en: {image_path}")
         
-        for i in range(num_samples):
-            # Seleccionar muestra aleatoria
-            sample = self.val_df.sample(1).iloc[0]
-            img_path = os.path.join(config.TRAIN_IMG_DIR, f"{sample['patientId']}.png")
+        # Obtener el nombre del archivo sin extensión
+        image_name = os.path.splitext(os.path.basename(image_path))[0]
+        
+        # Buscar en el dataframe si la imagen tiene anotaciones
+        sample = None
+        if image_name in self.val_df['patientId'].values:
+            sample = self.val_df[self.val_df['patientId'] == image_name].iloc[0]
+        
+        # Cargar y preprocesar imagen
+        img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            raise ValueError(f"No se pudo cargar la imagen: {image_path}")
             
-            # Cargar y preprocesar imagen
-            img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-            img = cv2.resize(img, config.IMG_SIZE)
-            img_input = np.expand_dims(img, axis=(0, -1)) / 255.0
-            
-            # Predecir
-            pred = self.model.predict(img_input)[0]
-            pred_mask = (pred > 0.5).astype(np.uint8)
-            
-            # Crear máscara real (ground truth)
+        original_size = img.shape[:2]  # Guardar tamaño original
+        img_resized = cv2.resize(img, config.IMG_SIZE)
+        img_input = np.expand_dims(img_resized, axis=(0, -1)) / 255.0
+        
+        # Predecir
+        pred = self.model.predict(img_input)[0]
+        pred_mask = (pred > 0.1).astype(np.uint8)
+        
+        # Redimensionar la máscara de predicción al tamaño original
+        pred_mask_original = cv2.resize(pred_mask.squeeze(), (original_size[1], original_size[0]))
+        
+        # Crear máscara real (ground truth) si existe en los datos
+        true_mask = None
+        if sample is not None:
             true_mask = np.zeros(config.IMG_SIZE, dtype=np.uint8)
             if sample['Target'] == 1:
                 x = int(sample['x'] * config.IMG_SIZE[1] / 1024)
@@ -65,28 +78,43 @@ class PneumoniaEvaluator:
                 w = int(sample['width'] * config.IMG_SIZE[1] / 1024)
                 h = int(sample['height'] * config.IMG_SIZE[0] / 1024)
                 cv2.rectangle(true_mask, (x,y), (x+w,y+h), 1, -1)
-            
-            # Visualización
-            plt.subplot(num_samples, 3, i*3+1)
-            plt.imshow(img, cmap='gray')
-            plt.title(f"Imagen {sample['patientId']}\nTarget: {sample['Target']}")
-            plt.axis('off')
-            
-            plt.subplot(num_samples, 3, i*3+2)
+        
+        # Visualización
+        plt.figure(figsize=(15, 5))
+        
+        plt.subplot(1, 3, 1)
+        plt.imshow(img, cmap='gray')
+        plt.title(f"Imagen Original\n{os.path.basename(image_path)}")
+        plt.axis('off')
+        
+        if true_mask is not None:
+            plt.subplot(1, 3, 2)
             plt.imshow(true_mask, cmap='gray')
-            plt.title("Máscara Real")
+            plt.title("Máscara Real (si existe)")
             plt.axis('off')
-            
-            plt.subplot(num_samples, 3, i*3+3)
-            plt.imshow(pred_mask.squeeze(), cmap='gray')
-            plt.title("Predicción del Modelo")
+        else:
+            plt.subplot(1, 3, 2)
+            plt.text(0.5, 0.5, "No hay máscara real\ndisponible", 
+                    ha='center', va='center')
             plt.axis('off')
         
+        plt.subplot(1, 3, 3)
+        plt.imshow(pred_mask.squeeze(), cmap='gray')
+        plt.title("Predicción del Modelo")
+        plt.axis('off')
+        
         plt.tight_layout()
-        output_path = os.path.join(config.MODEL_SAVE_DIR, 'predictions.png')
+        output_path = os.path.join(config.MODEL_SAVE_DIR, f'prediction_{image_name}.png')
         plt.savefig(output_path)
-        print(f"\n💾 Visualizaciones guardadas en: {output_path}")
+        print(f"\n💾 Visualización guardada en: {output_path}")
         plt.show()
+        
+        return {
+            'image': img,
+            'prediction': pred_mask_original,
+            'ground_truth': true_mask,
+            'prediction_resized': pred_mask
+        }
 
 class PneumoniaDataGenerator(tf.keras.utils.Sequence):
     """Generador de datos para evaluación (similar al de entrenamiento)"""
@@ -136,17 +164,20 @@ if __name__ == '__main__':
     try:
         evaluator = PneumoniaEvaluator()
         
-        # 1. Evaluación cuantitativa
-        evaluator.evaluate_model()
+        # 1. Evaluación cuantitativa (opcional)
+        # evaluator.evaluate_model()
         
-        # 2. Visualización cualitativa
-        evaluator.visualize_predictions(num_samples=3)
+        # 2. Definir la ruta de la imagen directamente en el código
+        image_path = "dataset/Test/neumoniasevera.png"  # <-- MODIFICA AQUÍ CON TU RUTA
+        
+        # 3. Realizar predicción en la imagen especificada
+        evaluator.predict_single_image(image_path)
         
         print("\n🎉 Evaluación completada con éxito!")
     except Exception as e:
         print(f"\n❌ Error durante la evaluación: {str(e)}")
         print("\nPosibles soluciones:")
-        print("1. Verifica que hayas ejecutado primero 1_preprocess.py y 2_train.py")
+        print("1. Verifica que la ruta de la imagen sea correcta")
         print("2. Confirma que existe best_model.keras en la carpeta models/")
         print("3. Asegúrate que los archivos de validación estén en su lugar")
         print("4. Revisa que las rutas en config.py sean correctas")

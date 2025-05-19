@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 
 # ========== CONFIGURACIÓN ==========
 INPUT_CONFIG = {
-    'image_path': 'dataset/Test/neumonia-.png',  # Ruta de la imagen
+    'image_path': "dataset/Test/neumoniasevera.png",  # Ruta de la imagen
     'age': 45,                                 # Edad del paciente
     'sex': 1,                                  # 0: Femenino, 1: Masculino
     'output_dir': 'results',                   # Carpeta para guardar resultados
@@ -45,6 +45,16 @@ def preprocess_for_model(image, target_size):
     img = cv2.resize(image, target_size)
     img = img.astype(np.float32) / 255.0
     return np.expand_dims(img, axis=-1)  # Añade dimensión de canal
+
+def apply_colored_mask(image, mask, color=[0, 255, 0], alpha=0.3):
+    """Superpone una máscara coloreada sobre la imagen original."""
+    # Crear una máscara RGB del color especificado
+    colored_mask = np.zeros_like(image)
+    colored_mask[mask > 0] = color  # Aplicar color (ej: verde [0,255,0])
+    
+    # Combinar imagen y máscara con transparencia
+    overlayed = cv2.addWeighted(image, 1, colored_mask, alpha, 0)
+    return overlayed
 
 # ========== PIPELINE PRINCIPAL ==========
 def main():
@@ -102,25 +112,19 @@ def main():
         print(f"❌ Error en segmentación pulmonar: {str(e)}")
         return
 
-    # Detección de daño
+    # ========== DETECCIÓN DE DAÑO (VERSIÓN CORREGIDA) ==========
     print("\n⚠️ Detectando áreas dañadas...")
     try:
-        # Preprocesar específicamente para el modelo 'damage' (128x128)
+        # Preprocesar para el modelo 'damage' (128x128)
         damage_img = preprocess_for_model(original_img, INPUT_CONFIG['damage_size'])
         damage_input = np.expand_dims(damage_img, axis=0)  # Forma: (1, 128, 128, 1)
         
-        boxes = models['damage'].predict(damage_input)[0]
-        damage_mask = np.zeros(INPUT_CONFIG['img_size'], dtype=np.uint8)  # Mascara final en 512x512
+        # Predecir (genera máscara binaria)
+        pred = models['damage'].predict(damage_input)[0]
+        pred_mask = (pred > 0.1).astype(np.uint8)  # Usa el mismo umbral que en tu prueba
         
-        for box in boxes:
-            if box[4] > 0.3:  # Filtro de confianza
-                x, y, w, h = box[:4]
-                # Escalar coordenadas a 512x512 (tamaño original para visualización)
-                x1 = int(x * INPUT_CONFIG['img_size'][1])
-                y1 = int(y * INPUT_CONFIG['img_size'][0])
-                x2 = int((x + w) * INPUT_CONFIG['img_size'][1])
-                y2 = int((y + h) * INPUT_CONFIG['img_size'][0])
-                cv2.rectangle(damage_mask, (x1, y1), (x2, y2), 1, -1)
+        # Redimensionar a 512x512 para que coincida con lung_mask
+        damage_mask = cv2.resize(pred_mask.squeeze(), INPUT_CONFIG['img_size'], interpolation=cv2.INTER_NEAREST)
         
         print(f"• Áreas dañadas detectadas: {np.sum(damage_mask)} píxeles")
     except Exception as e:
@@ -138,30 +142,52 @@ def main():
     # Visualización
     print("\n🎨 Generando visualización...")
     try:
+        # Convertir todo a RGB
+        original_img_resized = cv2.resize(original_img, INPUT_CONFIG['img_size'])
+        original_img_rgb = cv2.cvtColor(original_img_resized, cv2.COLOR_GRAY2RGB)
+
+        # Crear máscaras coloreadas
+        lung_colored = np.zeros_like(original_img_rgb)
+        lung_colored[lung_mask == 1] = [0, 255, 0]  # Verde
+
+        damage_colored = np.zeros_like(original_img_rgb)
+        damage_colored[damage_mask == 1] = [255, 0, 0]  # Rojo
+
+        # Superponer (usando addWeighted para transparencia)
+        overlay = original_img_rgb.copy()
+        overlay = cv2.addWeighted(overlay, 1.0, lung_colored, 0.3, 0)  # Verde al 30%
+        overlay = cv2.addWeighted(overlay, 1.0, damage_colored, 0.7, 0)  # Rojo al 70%
+
+        # Visualización
         plt.figure(figsize=(15, 5))
-        
+
         # Imagen original
         plt.subplot(1, 3, 1)
-        plt.imshow(original_img, cmap='gray')
-        plt.title("Imagen Original")
+        plt.imshow(original_img_rgb)
+        plt.title(f"{diagnosis} (Probabilidad: {pneumonia_prob:.2%})")
         plt.axis('off')
-        
-        # Superposición
+
+        # Superposición (pulmones + daño)
         plt.subplot(1, 3, 2)
-        plt.imshow(original_img, cmap='gray')
-        plt.imshow(np.ma.masked_where(lung_mask == 0, lung_mask), 
-                  cmap='Greens', alpha=0.3)
-        plt.imshow(np.ma.masked_where(damage_mask == 0, damage_mask), 
-                  cmap='Reds', alpha=0.5)
-        plt.title(f"Daño: {damage_perc:.2f}%")
+        plt.imshow(overlay)
+        plt.title(f"Daño pulmonar: {damage_perc:.2f}%")
         plt.axis('off')
-        
-        # Mapa de calor
+
+        # Mapa de calor del daño (versión funcional)
         plt.subplot(1, 3, 3)
-        plt.imshow(damage_mask, cmap='hot')
-        plt.title(f"Prob: {pneumonia_prob:.2%}")
+
+        # Usar la predicción original (antes del threshold) si está disponible
+        if 'pred' in locals():  # Si existe la variable pred de tu modelo
+            heatmap = cv2.resize(pred.squeeze(), INPUT_CONFIG['img_size'])
+            plt.imshow(heatmap, cmap='hot', vmin=0, vmax=1)  # Escala 0-1
+        else:
+            # Si solo tienes la máscara binaria, conviértela a float
+            plt.imshow(damage_mask.astype(float), cmap='hot', vmin=0, vmax=1)
+
+        plt.colorbar(label='Confianza')  # Añadir barra de color
+        plt.title("Mapa de Calor del Daño")
         plt.axis('off')
-        
+
         # Guardar
         os.makedirs(INPUT_CONFIG['output_dir'], exist_ok=True)
         output_path = os.path.join(INPUT_CONFIG['output_dir'], 
