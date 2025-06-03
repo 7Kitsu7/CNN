@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 
 # ========== CONFIGURACIÓN ==========
 INPUT_CONFIG = {
-    'image_path': "dataset/Test/neumoniasevera.png",  # Ruta de la imagen
+    'image_path': "dataset/Test/torax sano.jpg",  # Ruta de la imagen
     'age': 45,                                 # Edad del paciente
     'sex': 1,                                  # 0: Femenino, 1: Masculino
     'output_dir': 'results',                   # Carpeta para guardar resultados
@@ -121,7 +121,7 @@ def main():
         
         # Predecir (genera máscara binaria)
         pred = models['damage'].predict(damage_input)[0]
-        pred_mask = (pred > 0.1).astype(np.uint8)  # Usa el mismo umbral que en tu prueba
+        pred_mask = (pred > 0.15).astype(np.uint8)  # Usa el mismo umbral que en tu prueba
         
         # Redimensionar a 512x512 para que coincida con lung_mask
         damage_mask = cv2.resize(pred_mask.squeeze(), INPUT_CONFIG['img_size'], interpolation=cv2.INTER_NEAREST)
