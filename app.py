@@ -10,6 +10,9 @@ from tensorflow.keras.models import load_model
 from tensorflow.keras.utils import register_keras_serializable
 from utils import preprocess_for_model, dice_coefficient
 import traceback
+import google.generativeai as genai  # Añade al inicio del archivo
+import requests  # Añade esto al inicio del archivo
+import datetime  # <-- Añade esta línea
 
 app = Flask(__name__)
 CORS(app)  # Permitir CORS para Flutter
@@ -20,6 +23,7 @@ models = {
     'lung': load_model('model/best_pulmonar.keras', custom_objects={'dice_coefficient': dice_coefficient}),
     'damage': load_model('model/best_daño.keras')
 }
+genai.configure(api_key='AIzaSyALYl3jq_eF-Wr269SA6Ffm_CsVhBogOeA')  # Reemplaza con tu API key
 
 IMG_SIZES = {
     'clf_size': (224, 224),
@@ -102,6 +106,92 @@ def predict():
         print("ERROR EN PREDICCIÓN:", e)
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+    
 
+@app.route('/get_recommendation', methods=['POST'])
+def get_recommendation():
+    data = request.get_json()
+    
+    # Datos del diagnóstico recibidos desde Flutter
+    diagnostico = data.get('diagnostico')
+    probabilidad = data.get('probabilidad')
+    dano_pulmonar = data.get('dano_pulmonar')
+    edad = data.get('edad')
+    sexo = data.get('sexo')
+
+    # Validación básica
+    if None in [diagnostico, probabilidad, dano_pulmonar, edad, sexo]:
+        return jsonify({'error': 'Faltan datos para la recomendación'}), 400
+
+    try:
+        # Modelo Gemini (usa 'gemini-pro' o 'gemini-2.0-flash')
+        model = genai.GenerativeModel('gemini-2.0-flash')
+        
+        # Prompt estructurado para Gemini
+        prompt = f"""
+        Eres un médico experto en neumología. Genera una recomendación médica basada en estos datos que se obtuvieron de la radiografia de torax y datos del paciente:
+
+        - **Edad**: {edad} años
+        - **Sexo**: {sexo}
+        - **Diagnóstico preliminar**: {diagnostico}
+        - **Probabilidad de neumonía**: {probabilidad * 100:.1f}%
+        - **Daño pulmonar estimado**: {int(dano_pulmonar)}%
+
+        Debe incluir lo siguiente :
+        1. Explicación clara del diagnóstico en términos no técnicos.
+        2. Acciones inmediatas (ej: medicamentos, reposo).
+        3. Recomendaciones de seguimiento (ej: especialista, pruebas).
+        4. Precauciones generales (ej: evitar fumar).
+
+        Responde en español. Tu respuesta debe ser corta y precisa.
+        """
+
+        # Consulta a Gemini
+        response = model.generate_content(prompt)
+        recomendacion = response.text
+
+        # 2. Preparar datos para el webhook
+        webhook_data = {
+            "paciente": {
+                "edad": edad,
+                "sexo": sexo
+            },
+            "diagnostico": {
+                "resultado": diagnostico,
+                "probabilidad_neumonia": f"{probabilidad * 100:.1f}%",
+                "dano_pulmonar": f"{int(dano_pulmonar)}%"
+            },
+            "recomendacion": recomendacion,
+            "timestamp": datetime.datetime.now().isoformat()
+        }
+
+        # 3. Enviar al webhook
+        webhook_url = "https://wazilrest-n8n.xwk85y.easypanel.host/webhook/1733b542-3069-4623-8d55-614b9e3a6172"
+        headers = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+        }
+        
+        webhook_response = requests.post(
+            webhook_url,
+            json=webhook_data,
+            headers=headers,
+            timeout=10  # 10 segundos de timeout
+        )
+
+        # Verificar respuesta del webhook
+        if webhook_response.status_code not in [200, 201]:
+            return jsonify({
+                'error': f'Error al enviar al webhook: {webhook_response.text}',
+                'recomendacion': recomendacion
+            }), 500
+        
+        return jsonify({
+            'recomendacion': recomendacion
+        })
+
+    except Exception as e:
+        return jsonify({'error': f'Error al consultar Gemini: {str(e)}'}), 500
+    
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
